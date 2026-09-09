@@ -5,7 +5,7 @@ import { runConnector, normalize } from "./connectors/index.mjs";
 import { score, similarity } from "./scoring.mjs";
 export async function enqueue(c, team, id, force = false) {
   const { rows } = await c.query(
-    `INSERT INTO jobs(team_id,connection_id) SELECT team_id,id FROM connections WHERE team_id=$1 AND id=$2 AND enabled AND ($3 OR next_sync<=now()) ON CONFLICT DO NOTHING RETURNING id`,
+    `INSERT INTO jobs(team_id,connection_id) SELECT team_id,id FROM connections WHERE team_id=$1 AND id=$2 AND enabled AND archived_at IS NULL AND ($3 OR next_sync<=now()) ON CONFLICT DO NOTHING RETURNING id`,
     [team, id, force],
   );
   return rows[0]?.id ?? null;
@@ -16,7 +16,7 @@ export async function schedule() {
       `UPDATE jobs SET status=CASE WHEN attempts>=4 THEN 'failed' ELSE 'queued' END, run_at=now(), error='Worker lease expired' WHERE status='running' AND lease_until<now()`,
     );
     await c.query(
-      `INSERT INTO jobs(team_id,connection_id) SELECT team_id,id FROM connections WHERE enabled AND next_sync<=now() ON CONFLICT DO NOTHING`,
+      `INSERT INTO jobs(team_id,connection_id) SELECT team_id,id FROM connections WHERE enabled AND archived_at IS NULL AND next_sync<=now() ON CONFLICT DO NOTHING`,
     );
     await c.query(
       `UPDATE sessions SET checked_at=now() WHERE checked_at IS NULL AND created_at<=now()-interval '1 minute' AND expires_at>now() RETURNING team_id`,

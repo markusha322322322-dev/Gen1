@@ -19,4 +19,8 @@ CREATE INDEX IF NOT EXISTS jobs_ready ON jobs(status,run_at);
 CREATE INDEX IF NOT EXISTS listing_feed ON listings(team_id,archived,published_at DESC);
 CREATE INDEX IF NOT EXISTS listing_stage ON listings(team_id,stage_id);
 CREATE TABLE IF NOT EXISTS login_attempts(key text PRIMARY KEY, count integer NOT NULL, reset_at timestamptz NOT NULL);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS login text;
+CREATE UNIQUE INDEX IF NOT EXISTS users_login_unique ON users(login) WHERE login IS NOT NULL;
+ALTER TABLE members ADD COLUMN IF NOT EXISTS blocked_at timestamptz;
+ALTER TABLE connections ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 INSERT INTO connectors(key,label,kind) VALUES('mock','Mock Studio','mock'),('rss','RSS / Atom','rss'),('json','Разрешённый JSON API','api') ON CONFLICT DO NOTHING;

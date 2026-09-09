@@ -26,6 +26,15 @@ import {
   GripVertical,
   Radio,
   Menu,
+  MoreVertical,
+  Pencil,
+  Trash2,
+  Shield,
+  KeyRound,
+  Lock,
+  Unlock,
+  Power,
+  Globe2,
 } from "lucide-react";
 import {
   Sidebar,
@@ -186,7 +195,10 @@ export default function App() {
     [modal, setModal] = useState(""),
     [form, setForm] = useState<Data>({}),
     [busy, setBusy] = useState(false),
-    [invite, setInvite] = useState("");
+    [invite, setInvite] = useState(""),
+    [connectionTab, setConnectionTab] = useState("active"),
+    [probe, setProbe] = useState<Data | null>(null),
+    [moving, setMoving] = useState<Set<string>>(new Set());
   const admin = me && ["owner", "admin"].includes(me.role),
     write = me?.role !== "viewer";
   const init = useCallback(async () => {
@@ -339,6 +351,38 @@ export default function App() {
     if (result)
       setSelected((prev) => (prev?.id === l.id ? { ...prev, ...p } : prev));
   }
+  async function moveListing(l: Data, stage_id: string | null) {
+    if ((l.stage_id || null) === stage_id || moving.has(l.id)) return;
+    const previousStage = l.stage_id || null;
+    setItems((current) =>
+      current.map((item) => (item.id === l.id ? { ...item, stage_id } : item)),
+    );
+    setSelected((current) =>
+      current?.id === l.id ? { ...current, stage_id } : current,
+    );
+    setMoving((current) => new Set(current).add(l.id));
+    try {
+      await api("listings/" + l.id, "PATCH", { stage_id });
+    } catch (e: any) {
+      setItems((current) =>
+        current.map((item) =>
+          item.id === l.id ? { ...item, stage_id: previousStage } : item,
+        ),
+      );
+      setSelected((current) =>
+        current?.id === l.id
+          ? { ...current, stage_id: previousStage }
+          : current,
+      );
+      toast.error(`Перемещение отменено: ${e.message}`);
+    } finally {
+      setMoving((current) => {
+        const next = new Set(current);
+        next.delete(l.id);
+        return next;
+      });
+    }
+  }
   function show(kind: string, defaults: Data = {}) {
     setForm(defaults);
     setModal(kind);
@@ -361,6 +405,42 @@ export default function App() {
           ...form,
           interval_minutes: Number(form.interval_minutes),
         });
+        break;
+      case "editConnection": {
+        const payload: Data = {
+          name: form.name,
+          connector: form.connector,
+          url: form.url,
+          platform: form.platform || "",
+          array_path: form.array_path || undefined,
+          interval_minutes: Number(form.interval_minutes),
+        };
+        if (form.secret) payload.secret = form.secret;
+        result = await action("connections/" + form.id, "PATCH", payload, "Источник обновлён");
+        break;
+      }
+      case "probe":
+        setBusy(true);
+        try {
+          result = await api("connections/probe", "POST", {
+            url: form.url,
+            ...(form.secret ? { secret: form.secret } : {}),
+          });
+          setProbe(result);
+          toast.success("Проверка завершена");
+        } catch (e: any) {
+          toast.error(e.message);
+        } finally {
+          setBusy(false);
+        }
+        return;
+      case "account":
+        result = await action("accounts", "POST", form, "Аккаунт создан");
+        if (result) {
+          setForm({ login: result.login, password: result.password, credentialKind: "account" });
+          setModal("credentials");
+          return;
+        }
         break;
       case "board":
         result = await action("boards", "POST", {
@@ -457,10 +537,10 @@ export default function App() {
                 <input name="name" required autoComplete="name" />
               </Field>
             )}
-            <Field label="Email">
+            <Field label="Email или логин">
               <input
                 name="email"
-                type="email"
+                type={invite ? "email" : "text"}
                 autoComplete="email"
                 required
                 placeholder="name@studio.com"
@@ -499,7 +579,9 @@ export default function App() {
   function Card({ l, compact = false }: { l: Data; compact?: boolean }) {
     return (
       <article
-        className={"listing " + (compact ? "compact" : "")}
+        className={
+          "listing " + (compact ? "compact " : "") + (moving.has(l.id) ? "saving-move" : "")
+        }
         draggable={write && view === "boards"}
         onDragStart={(e) => e.dataTransfer.setData("text/plain", l.id)}
       >
@@ -1042,7 +1124,7 @@ export default function App() {
                       e.preventDefault();
                       const id = e.dataTransfer.getData("text/plain");
                       const l = items.find((l) => l.id === id);
-                      if (l) patch(l, { stage_id: st.id || null });
+                      if (l) moveListing(l, st.id || null);
                     }}
                   >
                     <div className="column-title">
@@ -1081,11 +1163,56 @@ export default function App() {
             <>
               <div className="notice">
                 <Radio size={18} />
-                Личные подключения, общий поток команды. Токены доступны только
-                серверу.
+                <span>Личные подключения, общий поток команды. Токены доступны только серверу.</span>
+                {write && (
+                  <button
+                    className="button"
+                    onClick={() => {
+                      setProbe(null);
+                      show("probe", { url: "", secret: "" });
+                    }}
+                  >
+                    <Globe2 size={16} />
+                    Проверить URL / API
+                  </button>
+                )}
+              </div>
+              <div className="source-tabs" role="tablist" aria-label="Состояние источников">
+                {[
+                  ["active", "Активные"],
+                  ["disabled", "Отключённые"],
+                  ["archive", "Архив"],
+                ].map(([key, label]) => (
+                  <button
+                    key={key}
+                    role="tab"
+                    aria-selected={connectionTab === key}
+                    className={connectionTab === key ? "active" : ""}
+                    onClick={() => setConnectionTab(key)}
+                  >
+                    {label}
+                    <span>
+                      {connections.filter((c) =>
+                        key === "archive"
+                          ? !!c.archived_at
+                          : key === "disabled"
+                            ? !c.archived_at && !c.enabled
+                            : !c.archived_at && c.enabled,
+                      ).length}
+                    </span>
+                  </button>
+                ))}
               </div>
               <div className="connection-grid">
-                {connections.map((c) => (
+                {connections
+                  .filter((c) =>
+                    connectionTab === "archive"
+                      ? !!c.archived_at
+                      : connectionTab === "disabled"
+                        ? !c.archived_at && !c.enabled
+                        : !c.archived_at && c.enabled,
+                  )
+                  .map((c) => (
                   <div key={c.id} className="connection-card">
                     <div className="connection-title">
                       <span className="large-source">
@@ -1101,14 +1228,61 @@ export default function App() {
                           {registry.find((r) => r.key === c.connector)?.label}
                         </span>
                       </div>
-                      <Switch
-                        aria-label={"Подключение " + c.name}
-                        disabled={!write || (c.owner_id !== me.id && !admin)}
-                        checked={c.enabled}
-                        onCheckedChange={(v) =>
-                          action("connections/" + c.id, "PATCH", { enabled: v })
-                        }
-                      />
+                      {!c.archived_at && (
+                        <Switch
+                          aria-label={"Подключение " + c.name}
+                          disabled={!write || (c.owner_id !== me.id && !admin)}
+                          checked={c.enabled}
+                          onCheckedChange={(v) =>
+                            action("connections/" + c.id, "PATCH", { enabled: v })
+                          }
+                        />
+                      )}
+                      {write && (c.owner_id === me.id || admin) && (
+                        <details className="action-menu">
+                          <summary aria-label={"Действия с источником " + c.name}>
+                            <MoreVertical size={18} />
+                          </summary>
+                          <div>
+                            {c.owner_id === me.id && (
+                              <button
+                                onClick={() =>
+                                  show("editConnection", {
+                                    id: c.id,
+                                    name: c.name,
+                                    connector: c.connector,
+                                    url: c.config?.url || "",
+                                    platform: c.config?.platform || "",
+                                    array_path: c.config?.array_path || "",
+                                    interval_minutes: c.interval_minutes,
+                                    secret: "",
+                                  })
+                                }
+                              >
+                                <Pencil size={14} /> Редактировать
+                              </button>
+                            )}
+                            <button
+                              onClick={() =>
+                                action("connections/" + c.id, "PATCH", {
+                                  archived: !c.archived_at,
+                                }, c.archived_at ? "Источник восстановлен" : "Источник архивирован")
+                              }
+                            >
+                              <Archive size={14} /> {c.archived_at ? "Восстановить" : "В архив"}
+                            </button>
+                            <button
+                              className="danger"
+                              onClick={() => {
+                                if (window.confirm(`Удалить источник «${c.name}»? Исторические объявления сохранятся.`))
+                                  action("connections/" + c.id, "DELETE", undefined, "Источник удалён");
+                              }}
+                            >
+                              <Trash2 size={14} /> Удалить
+                            </button>
+                          </div>
+                        </details>
+                      )}
                     </div>
                     <div
                       className={
@@ -1121,7 +1295,9 @@ export default function App() {
                           (c.error ? "bad" : c.enabled ? "" : "off")
                         }
                       />
-                      {c.error
+                      {c.archived_at
+                        ? "В архиве"
+                        : c.error
                         ? "Ошибка"
                         : !c.enabled
                           ? "Отключён"
@@ -1179,7 +1355,7 @@ export default function App() {
                     <div className="connection-actions">
                       <button
                         className="button full"
-                        disabled={!write || !c.enabled || busy}
+                        disabled={!write || !c.enabled || !!c.archived_at || busy}
                         onClick={() =>
                           action(
                             "connections/" + c.id + "/sync",
@@ -1205,6 +1381,18 @@ export default function App() {
                     </div>
                   </div>
                 ))}
+                {connections.filter((c) =>
+                  connectionTab === "archive"
+                    ? !!c.archived_at
+                    : connectionTab === "disabled"
+                      ? !c.archived_at && !c.enabled
+                      : !c.archived_at && c.enabled,
+                ).length === 0 && (
+                  <div className="empty source-empty">
+                    <Radio size={28} />
+                    <h3>В этом разделе источников нет</h3>
+                  </div>
+                )}
                 <button
                   className="add-source-card"
                   disabled={!write}
@@ -1430,8 +1618,23 @@ export default function App() {
           )}
           {view === "team" && (
             <div className="member-list">
+              {me.role === "owner" && (
+                <div className="owner-panel-head">
+                  <div>
+                    <span className="eyebrow">OWNER / УПРАВЛЯЕМЫЕ АККАУНТЫ</span>
+                    <h3>Доступ команды</h3>
+                    <p>Логин и временный пароль показываются один раз после создания или сброса.</p>
+                  </div>
+                  <button
+                    className="button dark"
+                    onClick={() => show("account", { name: "", role: "member" })}
+                  >
+                    <Shield size={16} /> Создать аккаунт
+                  </button>
+                </div>
+              )}
               {members.map((m) => (
-                <div key={m.id} className="member-row">
+                <div key={m.id} className={"member-row " + (m.blocked_at ? "blocked" : "")}>
                   <span className="avatar">
                     {m.name.slice(0, 2).toUpperCase()}
                   </span>
@@ -1440,23 +1643,64 @@ export default function App() {
                       {m.name}
                       {m.id === me.id ? " (вы)" : ""}
                     </b>
-                    <p>{m.email}</p>
+                    <p>{m.login ? `Логин: ${m.login}` : m.email}</p>
+                    {me.role === "owner" && (
+                      <small>{m.blocked_at ? "Заблокирован" : `Активных сессий: ${m.session_count || 0}`}</small>
+                    )}
                   </div>
-                  {me.role === "owner" && m.role !== "owner" ? (
+                  {me.role === "owner" && m.id !== me.id ? (
                     <Choice
                       label="Роль участника"
                       value={m.role}
                       options={[
+                        ["owner", "Владелец"],
                         ["admin", "Администратор"],
                         ["member", "Участник"],
-                        ["viewer", "Наблюдатель"],
                       ]}
                       onChange={(v) =>
-                        action("members/" + m.id, "PATCH", { role: v })
+                        action("accounts/" + m.id, "PATCH", { role: v }, "Роль обновлена")
                       }
                     />
                   ) : (
                     <span className="role-tag">{roleNames[m.role]}</span>
+                  )}
+                  {me.role === "owner" && m.id !== me.id && (
+                    <details className="action-menu member-actions">
+                      <summary aria-label={"Управление аккаунтом " + m.name}>
+                        <MoreVertical size={18} />
+                      </summary>
+                      <div>
+                        <button
+                          onClick={() =>
+                            action(
+                              "accounts/" + m.id,
+                              "PATCH",
+                              { blocked: !m.blocked_at },
+                              m.blocked_at ? "Аккаунт разблокирован" : "Аккаунт заблокирован",
+                            )
+                          }
+                        >
+                          {m.blocked_at ? <Unlock size={14} /> : <Lock size={14} />}
+                          {m.blocked_at ? "Разблокировать" : "Заблокировать"}
+                        </button>
+                        <button
+                          onClick={async () => {
+                            const result = await action("accounts/" + m.id + "/reset-password", "POST", {}, "Пароль сброшен");
+                            if (result) {
+                              setForm({ login: m.login || m.email, password: result.password, credentialKind: "reset" });
+                              setModal("credentials");
+                            }
+                          }}
+                        >
+                          <KeyRound size={14} /> Сбросить пароль
+                        </button>
+                        <button
+                          onClick={() => action("accounts/" + m.id + "/end-sessions", "POST", {}, "Сессии завершены")}
+                        >
+                          <Power size={14} /> Завершить сессии
+                        </button>
+                      </div>
+                    </details>
                   )}
                 </div>
               ))}
@@ -1796,6 +2040,10 @@ export default function App() {
                 {
                   invite: "Пригласить участника",
                   connection: "Подключить источник",
+                  editConnection: "Редактировать источник",
+                  probe: "Проверка URL / API / RSS / OpenAPI",
+                  account: "Создать аккаунт",
+                  credentials: "Данные для входа",
                   board: "Новая воронка",
                   stage: "Новый этап",
                   editStage: "Настройка этапа",
@@ -1810,6 +2058,12 @@ export default function App() {
               ? "Ссылка действует 72 часа. Передайте её участнику самостоятельно."
               : modal === "connection"
                 ? "Секрет сохраняется в зашифрованном виде."
+                : modal === "editConnection"
+                  ? "Пустое поле токена сохранит текущий секрет."
+                  : modal === "probe"
+                    ? "Сервер проверит адрес с allowlist и защитой от частных сетей."
+                    : modal === "credentials"
+                      ? "Скопируйте данные сейчас: пароль повторно не показывается."
                 : "Изменения сохранятся для вашей команды."}
           </DialogDescription>
           <form
@@ -1877,7 +2131,7 @@ export default function App() {
                 </>
               )
             ) : null}
-            {["board", "stage", "editStage", "connection"].includes(modal) && (
+            {["board", "stage", "editStage", "connection", "editConnection"].includes(modal) && (
               <Field label="Название">
                 <input
                   required
@@ -1908,7 +2162,7 @@ export default function App() {
                 />
               </Field>
             )}
-            {modal === "connection" && (
+            {["connection", "editConnection"].includes(modal) && (
               <>
                 <Field label="Коннектор">
                   <Choice
@@ -1958,6 +2212,142 @@ export default function App() {
                 </Field>
               </>
             )}
+            {modal === "probe" && (
+              <>
+                <Field label="URL для проверки">
+                  <input
+                    type="url"
+                    required
+                    value={form.url || ""}
+                    onChange={(e) => {
+                      change("url", e.target.value);
+                      setProbe(null);
+                    }}
+                    placeholder="https://example.com/feed"
+                  />
+                </Field>
+                <Field label="Bearer-токен (если нужен)">
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={form.secret || ""}
+                    onChange={(e) => change("secret", e.target.value)}
+                  />
+                </Field>
+                {probe && (
+                  <div className="probe-result">
+                    <div className="probe-summary">
+                      <span className={probe.ok ? "probe-ok" : "probe-bad"}>
+                        HTTP {probe.status}
+                      </span>
+                      <b>{String(probe.data_type).toUpperCase()}</b>
+                      <span>{probe.content_type}</span>
+                      <span>{probe.bytes} байт</span>
+                    </div>
+                    <div className="probe-section">
+                      <b>Поля</b>
+                      <div className="tags">
+                        {(probe.fields || []).map((field: string) => <span key={field}>{field}</span>)}
+                        {!probe.fields?.length && <span>не найдены</span>}
+                      </div>
+                    </div>
+                    <div className="probe-section">
+                      <b>Массивы</b>
+                      {(probe.arrays || []).map((array: Data) => (
+                        <p key={array.path}><code>{array.path}</code> · {array.length} элементов · {array.fields?.join(", ") || "без полей"}</p>
+                      ))}
+                      {!probe.arrays?.length && <p className="muted">Массивы не найдены</p>}
+                    </div>
+                    <div className="probe-section">
+                      <b>Preview</b>
+                      <pre>{typeof probe.preview === "string" ? probe.preview : JSON.stringify(probe.preview, null, 2)}</pre>
+                    </div>
+                    {probe.data_type === "openapi" && (
+                      <div className="probe-section">
+                        <b>GET endpoints из OpenAPI</b>
+                        {(probe.openapi_endpoints || []).map((endpoint: string) => (
+                          <button
+                            type="button"
+                            className="probe-endpoint"
+                            key={endpoint}
+                            onClick={() => {
+                              setForm((current) => ({ ...current, url: endpoint }));
+                              setProbe(null);
+                            }}
+                          >
+                            Проверить {endpoint}
+                          </button>
+                        ))}
+                        {!probe.openapi_endpoints?.length && <p className="muted">GET endpoints без обязательных path-параметров не найдены.</p>}
+                      </div>
+                    )}
+                    {probe.ok && probe.suggested_connector && (
+                      <button
+                        type="button"
+                        className="button lime full"
+                        onClick={() => {
+                          const hostname = new URL(form.url).hostname;
+                          setForm({
+                            connector: probe.suggested_connector,
+                            name: hostname,
+                            url: form.url,
+                            platform: hostname,
+                            array_path: probe.suggested_connector === "json" ? probe.suggested_array_path : undefined,
+                            secret: form.secret || "",
+                            interval_minutes: 15,
+                          });
+                          setModal("connection");
+                          setProbe(null);
+                        }}
+                      >
+                        Создать источник из результата <ArrowRight size={16} />
+                      </button>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+            {modal === "account" && (
+              <>
+                <Field label="Имя пользователя">
+                  <input required maxLength={200} value={form.name || ""} onChange={(e) => change("name", e.target.value)} />
+                </Field>
+                <Field label="Роль">
+                  <Choice
+                    label="Роль"
+                    value={form.role}
+                    onChange={(value) => change("role", value)}
+                    options={[
+                      ["owner", "Владелец"],
+                      ["admin", "Администратор"],
+                      ["member", "Участник"],
+                    ]}
+                  />
+                </Field>
+              </>
+            )}
+            {modal === "credentials" && (
+              <div className="credentials">
+                <Field label="Логин">
+                  <input readOnly value={form.login || ""} />
+                </Field>
+                <Field label="Пароль">
+                  <input readOnly value={form.password || ""} />
+                </Field>
+                <button
+                  type="button"
+                  className="button lime full"
+                  onClick={() =>
+                    navigator.clipboard
+                      .writeText(`Логин: ${form.login}\nПароль: ${form.password}`)
+                      .then(() => toast.success("Данные скопированы"))
+                      .catch(() => toast.error("Скопируйте данные вручную"))
+                  }
+                >
+                  <Copy size={16} /> Скопировать данные
+                </button>
+              </div>
+            )}
             {modal === "token" && (
               <Field label="Новый токен; пустое поле удалит текущий">
                 <input
@@ -1994,10 +2384,12 @@ export default function App() {
                 </Field>
               </>
             )}
-            {!form.url?.includes("?invite=") && (
+            {!form.url?.includes("?invite=") && !["credentials"].includes(modal) && (
               <button className="button lime full" disabled={busy}>
                 {busy
                   ? "Сохраняем…"
+                  : modal === "probe"
+                    ? "Проверить источник"
                   : modal === "invite"
                     ? "Создать приглашение"
                     : "Сохранить"}

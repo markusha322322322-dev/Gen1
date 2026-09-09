@@ -11,6 +11,7 @@ import {
 } from "./security.mjs";
 import { score } from "./scoring.mjs";
 import { enqueue } from "./queue.mjs";
+import { probeSource } from "./connectors/probe.mjs";
 import { z } from "zod";
 const email = z
   .string()
@@ -21,6 +22,7 @@ const password = z.string().min(12).max(128);
 const uuid = z.string().uuid();
 const text = z.string().trim().min(1).max(200);
 const roles = z.enum(["admin", "member", "viewer"]);
+const managedRoles = z.enum(["owner", "admin", "member"]);
 const rule = z.object({
   label: text,
   field: z.enum([
@@ -107,7 +109,7 @@ async function route(req) {
   }
   if (path === "auth/login" && method === "POST") {
     const v = z
-      .object({ email, password: z.string().min(1).max(128) })
+      .object({ email: z.string().trim().min(1).max(254).transform((s) => s.toLowerCase()), password: z.string().min(1).max(128) })
       .parse(b);
     const key = digest(v.email);
     const attempts = (
@@ -118,12 +120,12 @@ async function route(req) {
     ).rows[0].count;
     if (attempts > 20) fail(429, "Слишком много попыток. Подождите 15 минут.");
     const user = (
-      await rows("SELECT * FROM users WHERE email=$1", [v.email])
+      await rows("SELECT * FROM users WHERE email=$1 OR login=$1", [v.email])
     )[0];
     if (!user || !verifyPassword(v.password, user.password))
       fail(401, "Неверный email или пароль");
     const membership = (
-      await rows("SELECT * FROM members WHERE user_id=$1 LIMIT 1", [user.id])
+      await rows("SELECT * FROM members WHERE user_id=$1 AND blocked_at IS NULL LIMIT 1", [user.id])
     )[0];
     if (!membership) fail(403, "Доступ к команде отозван");
     const t = token();
@@ -153,7 +155,7 @@ async function route(req) {
         fail(401, "Введите пароль существующей учётной записи");
       if (!user) {
         user = { id: randomUUID() };
-        await c.query("INSERT INTO users VALUES($1,$2,$3,$4)", [
+        await c.query("INSERT INTO users(id,email,name,password) VALUES($1,$2,$3,$4)", [
           user.id,
           v.email,
           v.name,
@@ -161,7 +163,7 @@ async function route(req) {
         ]);
       }
       await c.query(
-        "INSERT INTO members VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+        "INSERT INTO members(team_id,user_id,role) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
         [invite.team_id, user.id, invite.role],
       );
       await c.query("UPDATE invites SET used_at=now() WHERE token=$1", [
@@ -179,7 +181,7 @@ async function route(req) {
   const s = raw
     ? (
         await rows(
-          `SELECT s.*,u.email,u.name,m.role,t.name AS team_name FROM sessions s JOIN users u ON u.id=s.user_id JOIN members m ON m.team_id=s.team_id AND m.user_id=s.user_id JOIN teams t ON t.id=s.team_id WHERE s.token=$1 AND s.expires_at>now()`,
+          `SELECT s.*,u.email,u.name,u.login,m.role,t.name AS team_name FROM sessions s JOIN users u ON u.id=s.user_id JOIN members m ON m.team_id=s.team_id AND m.user_id=s.user_id AND m.blocked_at IS NULL JOIN teams t ON t.id=s.team_id WHERE s.token=$1 AND s.expires_at>now()`,
           [digest(raw)],
         )
       )[0]
@@ -200,11 +202,12 @@ async function route(req) {
       id: s.user_id,
       name: s.name,
       email: s.email,
+      login: s.login,
       role: s.role,
       team: s.team_name,
       team_id: s.team_id,
       teams: await rows(
-        "SELECT t.id,t.name FROM teams t JOIN members m ON m.team_id=t.id WHERE m.user_id=$1 ORDER BY t.name",
+        "SELECT t.id,t.name FROM teams t JOIN members m ON m.team_id=t.id WHERE m.user_id=$1 AND m.blocked_at IS NULL ORDER BY t.name",
         [s.user_id],
       ),
     });
@@ -212,7 +215,7 @@ async function route(req) {
     const v = z.object({ team_id: uuid }).parse(b);
     if (
       !(
-        await rows("SELECT 1 FROM members WHERE team_id=$1 AND user_id=$2", [
+        await rows("SELECT 1 FROM members WHERE team_id=$1 AND user_id=$2 AND blocked_at IS NULL", [
           v.team_id,
           s.user_id,
         ])
@@ -233,7 +236,7 @@ async function route(req) {
       );
       if (result.rowCount)
         await c.query(
-          `INSERT INTO jobs(team_id,connection_id) SELECT team_id,id FROM connections WHERE team_id=$1 AND enabled AND next_sync<=now() ON CONFLICT DO NOTHING`,
+          `INSERT INTO jobs(team_id,connection_id) SELECT team_id,id FROM connections WHERE team_id=$1 AND enabled AND archived_at IS NULL AND next_sync<=now() ON CONFLICT DO NOTHING`,
           [s.team_id],
         );
     });
@@ -248,7 +251,7 @@ async function route(req) {
     )[0];
     const conn = (
       await rows(
-        "SELECT count(*) FILTER(WHERE enabled)::int AS active,count(*)::int AS total,max(last_sync) AS last_sync FROM connections WHERE team_id=$1",
+        "SELECT count(*) FILTER(WHERE enabled AND archived_at IS NULL)::int AS active,count(*) FILTER(WHERE archived_at IS NULL)::int AS total,max(last_sync) AS last_sync FROM connections WHERE team_id=$1",
         [s.team_id],
       )
     )[0];
@@ -448,13 +451,28 @@ async function route(req) {
   if (path === "connections" && method === "GET")
     return json({
       items: await rows(
-        `SELECT c.id,c.name,c.connector,c.owner_id,u.name AS owner,c.interval_minutes,c.enabled,c.last_sync,c.last_attempt,c.error,c.fetched,c.inserted,c.secret IS NOT NULL AS has_secret,CASE WHEN c.owner_id=$2 THEN c.config ELSE '{}'::jsonb END AS config,(SELECT status FROM jobs j WHERE j.connection_id=c.id ORDER BY j.id DESC LIMIT 1) AS job_status FROM connections c JOIN users u ON u.id=c.owner_id WHERE c.team_id=$1 ORDER BY c.name`,
-        [s.team_id, s.user_id],
+        `SELECT c.id,c.name,c.connector,c.owner_id,u.name AS owner,c.interval_minutes,c.enabled,c.archived_at,c.last_sync,c.last_attempt,c.error,c.fetched,c.inserted,c.secret IS NOT NULL AS has_secret,CASE WHEN c.owner_id=$2 OR $3 THEN c.config ELSE '{}'::jsonb END AS config,(SELECT status FROM jobs j WHERE j.connection_id=c.id ORDER BY j.id DESC LIMIT 1) AS job_status FROM connections c JOIN users u ON u.id=c.owner_id WHERE c.team_id=$1 ORDER BY c.name`,
+        [s.team_id, s.user_id, can(s.role, "admin")],
       ),
       registry: await rows(
         "SELECT key,label,kind FROM connectors ORDER BY label",
       ),
     });
+  if (path === "connections/probe" && method === "POST") {
+    need("write");
+    const v = z
+      .object({
+        url: z.string().url().max(2000),
+        secret: z.string().max(10000).optional(),
+      })
+      .strict()
+      .parse(b);
+    try {
+      return json(await probeSource(v.url, v.secret));
+    } catch (error) {
+      fail(400, error.message || "Не удалось проверить источник");
+    }
+  }
   if (path === "connections" && method === "POST") {
     need("write");
     const v = z
@@ -464,6 +482,7 @@ async function route(req) {
         interval_minutes: z.number().int().min(10).max(30),
         url: z.string().url().optional(),
         platform: z.string().max(100).optional(),
+        array_path: z.string().max(500).optional(),
         secret: z.string().max(10000).optional(),
       })
       .parse(b);
@@ -476,7 +495,7 @@ async function route(req) {
           s.user_id,
           v.connector,
           v.name,
-          JSON.stringify({ url: v.url, platform: v.platform }),
+          JSON.stringify({ url: v.url, platform: v.platform, array_path: v.array_path }),
           encrypt(v.secret),
           v.interval_minutes,
         ],
@@ -505,34 +524,64 @@ async function route(req) {
     if (method === "PATCH") {
       const v = z
         .object({
+          name: text.optional(),
+          connector: text.optional(),
+          url: z.string().url().max(2000).optional(),
+          platform: z.string().trim().max(100).optional(),
+          array_path: z.string().max(500).optional(),
           enabled: z.boolean().optional(),
+          archived: z.boolean().optional(),
           interval_minutes: z.number().int().min(10).max(30).optional(),
           secret: z.string().max(10000).optional(),
         })
+        .strict()
         .parse(b);
       if (
         c.owner_id !== s.user_id &&
-        (v.secret !== undefined || v.interval_minutes !== undefined)
+        (v.secret !== undefined ||
+          v.interval_minutes !== undefined ||
+          v.name !== undefined ||
+          v.connector !== undefined ||
+          v.url !== undefined ||
+          v.platform !== undefined ||
+          v.array_path !== undefined)
       )
         fail(403, "Только владелец может менять параметры");
-      await query(
-        "UPDATE connections SET enabled=COALESCE($3,enabled),interval_minutes=COALESCE($4,interval_minutes),secret=CASE WHEN $5 THEN $6 ELSE secret END WHERE team_id=$1 AND id=$2",
-        [
-          s.team_id,
-          id,
-          v.enabled ?? null,
-          v.interval_minutes ?? null,
-          v.secret !== undefined,
-          encrypt(v.secret),
-        ],
-      );
+      const config = {
+        ...(c.config || {}),
+        ...(v.url !== undefined ? { url: v.url } : {}),
+        ...(v.platform !== undefined ? { platform: v.platform } : {}),
+        ...(v.array_path !== undefined ? { array_path: v.array_path } : {}),
+      };
+      await tx(async (client) => {
+        await client.query(
+          `UPDATE connections SET
+            name=COALESCE($3,name),connector=COALESCE($4,connector),
+            config=$5,enabled=CASE WHEN $6 THEN false ELSE COALESCE($7,enabled) END,
+            archived_at=CASE WHEN $6 THEN now() WHEN $8 THEN NULL ELSE archived_at END,
+            interval_minutes=COALESCE($9,interval_minutes),
+            secret=CASE WHEN $10 THEN $11 ELSE secret END
+           WHERE team_id=$1 AND id=$2`,
+          [s.team_id,id,v.name ?? null,v.connector ?? null,JSON.stringify(config),v.archived === true,v.enabled ?? null,v.archived === false,v.interval_minutes ?? null,v.secret !== undefined,encrypt(v.secret)],
+        );
+        await audit(client, s, v.archived === true ? "Источник архивирован" : "Источник изменён", null, { connection_id: id });
+      });
+      return json({ ok: true });
+    }
+    if (method === "DELETE") {
+      if (c.owner_id !== s.user_id && !can(s.role, "admin"))
+        fail(403, "Удалить источник может владелец подключения или администратор");
+      await tx(async (client) => {
+        await client.query("DELETE FROM connections WHERE team_id=$1 AND id=$2", [s.team_id, id]);
+        await audit(client, s, "Источник удалён", null, { connection_id: id, name: c.name });
+      });
       return json({ ok: true });
     }
   }
   if (path === "sync" && method === "POST") {
     need("write");
     await query(
-      `INSERT INTO jobs(team_id,connection_id) SELECT team_id,id FROM connections WHERE team_id=$1 AND enabled ON CONFLICT DO NOTHING`,
+      `INSERT INTO jobs(team_id,connection_id) SELECT team_id,id FROM connections WHERE team_id=$1 AND enabled AND archived_at IS NULL ON CONFLICT DO NOTHING`,
       [s.team_id],
     );
     return json({ ok: true });
@@ -593,10 +642,68 @@ async function route(req) {
   if (path === "members" && method === "GET")
     return json({
       items: await rows(
-        "SELECT u.id,u.name,u.email,m.role FROM members m JOIN users u ON u.id=m.user_id WHERE m.team_id=$1 ORDER BY u.name",
+        "SELECT u.id,u.name,u.email,u.login,m.blocked_at,m.role,(SELECT count(*)::int FROM sessions se WHERE se.user_id=u.id AND se.team_id=m.team_id AND se.expires_at>now()) AS session_count FROM members m JOIN users u ON u.id=m.user_id WHERE m.team_id=$1 ORDER BY u.name",
         [s.team_id],
       ),
     });
+  if (path === "accounts" && method === "POST") {
+    need("owner");
+    const v = z.object({ name: text, role: managedRoles }).strict().parse(b);
+    const base = v.name
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[^a-z0-9]+/g, "")
+      .slice(0, 16) || "user";
+    let login;
+    do login = `${base}${String(Math.floor(Math.random() * 100000)).padStart(5, "0")}`;
+    while ((await rows("SELECT 1 FROM users WHERE login=$1", [login])).length);
+    const generatedPassword = token().slice(0, 20);
+    await tx(async (c) => {
+      const id = randomUUID();
+      await c.query(
+        "INSERT INTO users(id,email,name,password,login) VALUES($1,$2,$3,$4,$5)",
+        [id, `${login}@accounts.signal.invalid`, v.name, hashPassword(generatedPassword), login],
+      );
+      await c.query("INSERT INTO members(team_id,user_id,role) VALUES($1,$2,$3)", [s.team_id, id, v.role]);
+      await audit(c, s, "Создан управляемый аккаунт", null, { user_id: id, role: v.role });
+    });
+    return json({ login, password: generatedPassword }, 201);
+  }
+  m = path.match(/^accounts\/([\w-]+)(?:\/(reset-password|end-sessions))?$/);
+  if (m) {
+    need("owner");
+    const userId = uuid.parse(m[1]);
+    const target = (await rows("SELECT u.*,m.role FROM users u JOIN members m ON m.user_id=u.id WHERE m.team_id=$1 AND u.id=$2", [s.team_id, userId]))[0];
+    if (!target) fail(404, "Пользователь не найден");
+    if (userId === s.user_id) fail(400, "Для текущего владельца это действие недоступно");
+    if (!m[2] && method === "PATCH") {
+      const v = z.object({ role: managedRoles.optional(), blocked: z.boolean().optional() }).strict().parse(b);
+      if (v.role === undefined && v.blocked === undefined) fail(400, "Нет изменений");
+      await tx(async (c) => {
+        if (v.role !== undefined)
+          await c.query("UPDATE members SET role=$3 WHERE team_id=$1 AND user_id=$2", [s.team_id, userId, v.role]);
+        if (v.blocked !== undefined) {
+          await c.query("UPDATE members SET blocked_at=CASE WHEN $3 THEN now() ELSE NULL END WHERE team_id=$1 AND user_id=$2", [s.team_id, userId, v.blocked]);
+          if (v.blocked) await c.query("DELETE FROM sessions WHERE user_id=$1 AND team_id=$2", [userId, s.team_id]);
+        }
+        await audit(c, s, v.blocked === true ? "Аккаунт заблокирован" : "Аккаунт изменён", null, { user_id: userId, ...v });
+      });
+      return json({ ok: true });
+    }
+    if (m[2] === "reset-password" && method === "POST") {
+      const generatedPassword = token().slice(0, 20);
+      await tx(async (c) => {
+        await c.query("UPDATE users SET password=$2 WHERE id=$1", [userId, hashPassword(generatedPassword)]);
+        await c.query("DELETE FROM sessions WHERE user_id=$1", [userId]);
+        await audit(c, s, "Пароль аккаунта сброшен", null, { user_id: userId });
+      });
+      return json({ password: generatedPassword });
+    }
+    if (m[2] === "end-sessions" && method === "POST") {
+      await query("DELETE FROM sessions WHERE user_id=$1 AND team_id=$2", [userId, s.team_id]);
+      return json({ ok: true });
+    }
+  }
   m = path.match(/^members\/([\w-]+)$/);
   if (m && method === "PATCH") {
     need("owner");

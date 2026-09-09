@@ -43,13 +43,13 @@ for (const [id, email, role] of [
   [viewer, "viewer@signal.test", "viewer"],
   [member, "member@signal.test", "member"],
 ]) {
-  await q("INSERT INTO users VALUES($1,$2,$3,$4)", [
+  await q("INSERT INTO users(id,email,name,password) VALUES($1,$2,$3,$4)", [
     id,
     email,
     role,
     hashPassword("test-password-123"),
   ]);
-  await q("INSERT INTO members VALUES($1,$2,$3)", [team, id, role]);
+  await q("INSERT INTO members(team_id,user_id,role) VALUES($1,$2,$3)", [team, id, role]);
 }
 await q(
   "INSERT INTO connections(id,team_id,owner_id,connector,name) VALUES($1,$2,$3,'mock','Test mock')",
@@ -422,4 +422,93 @@ test("stale leases recover and disabled sources do not execute", async () => {
       .queued,
     false,
   );
+});
+test("probe rejects hosts outside the server allowlist before connecting", async () => {
+  const result = await call(
+    "connections/probe",
+    "POST",
+    { url: "https://127.0.0.1/private" },
+    oc,
+  );
+  assert.equal(result.status, 400);
+  assert.match(result.data.error, /не разрешён/);
+});
+test("owner creates managed accounts, hashes passwords and controls sessions", async () => {
+  const created = await call(
+    "accounts",
+    "POST",
+    { name: "Managed User", role: "member" },
+    oc,
+  );
+  assert.equal(created.status, 201);
+  assert.ok(created.data.login);
+  assert.equal(created.data.password.length, 20);
+  const stored = (
+    await q("SELECT * FROM users WHERE login=$1", [created.data.login])
+  ).rows[0];
+  assert.notEqual(stored.password, created.data.password);
+  const managedLogin = await call("auth/login", "POST", {
+    email: created.data.login,
+    password: created.data.password,
+  });
+  assert.equal(managedLogin.status, 200);
+  assert.equal((await call("me", "GET", null, managedLogin.cookie)).status, 200);
+  await call(`accounts/${stored.id}/end-sessions`, "POST", {}, oc);
+  assert.equal((await call("me", "GET", null, managedLogin.cookie)).status, 401);
+  const reset = await call(`accounts/${stored.id}/reset-password`, "POST", {}, oc);
+  assert.equal(reset.status, 200);
+  assert.equal(
+    (
+      await call("auth/login", "POST", {
+        email: created.data.login,
+        password: created.data.password,
+      })
+    ).status,
+    401,
+  );
+  assert.equal(
+    (
+      await call("auth/login", "POST", {
+        email: created.data.login,
+        password: reset.data.password,
+      })
+    ).status,
+    200,
+  );
+  await call(`accounts/${stored.id}`, "PATCH", { blocked: true }, oc);
+  assert.equal(
+    (
+      await call("auth/login", "POST", {
+        email: created.data.login,
+        password: reset.data.password,
+      })
+    ).status,
+    403,
+  );
+  await call(`accounts/${stored.id}`, "PATCH", { blocked: false, role: "admin" }, oc);
+  assert.equal(
+    (await q("SELECT role FROM members WHERE team_id=$1 AND user_id=$2", [team, stored.id])).rows[0].role,
+    "admin",
+  );
+});
+test("source archive and deletion preserve historical listings", async () => {
+  const before = (await q("SELECT count(*)::int AS n FROM listings WHERE team_id=$1", [team])).rows[0].n;
+  assert.equal(
+    (await call(`connections/${connection}`, "PATCH", { archived: true }, oc)).status,
+    200,
+  );
+  let source = (await call("connections", "GET", null, oc)).data.items.find((item) => item.id === connection);
+  assert.ok(source.archived_at);
+  assert.equal(source.enabled, false);
+  assert.equal(
+    (await call(`connections/${connection}`, "PATCH", { archived: false, enabled: true, name: "Renamed source" }, oc)).status,
+    200,
+  );
+  source = (await call("connections", "GET", null, oc)).data.items.find((item) => item.id === connection);
+  assert.equal(source.archived_at, null);
+  assert.equal(source.name, "Renamed source");
+  assert.equal((await call(`connections/${connection}`, "DELETE", null, oc)).status, 200);
+  const after = (await q("SELECT count(*)::int AS n FROM listings WHERE team_id=$1", [team])).rows[0].n;
+  assert.equal(after, before);
+  assert.equal((await q("SELECT count(*)::int AS n FROM connections WHERE id=$1", [connection])).rows[0].n, 0);
 });

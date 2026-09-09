@@ -7,7 +7,15 @@ const list = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
 export async function runConnector(c, secret) {
   if (c.connector === "mock") return mock();
   if (c.connector === "json") {
-    const v = JSON.parse(await get(c.config.url, secret));
+    let v = JSON.parse(await get(c.config.url, secret));
+    if (c.config.array_path && c.config.array_path !== "$") {
+      const parts = c.config.array_path
+        .replace(/^\$\.?/, "")
+        .replace(/\[0\]/g, "")
+        .split(".")
+        .filter(Boolean);
+      for (const part of parts) v = v?.[part];
+    }
     if (!Array.isArray(v))
       throw Error("JSON API должен возвращать массив единой модели");
     return v;

@@ -24,13 +24,13 @@ await tx(async (c) => {
       process.env.TEAM_NAME || "Studio Collective",
       JSON.stringify(defaultRules),
     ]);
-    await c.query("INSERT INTO users VALUES($1,$2,$3,$4)", [
+    await c.query("INSERT INTO users(id,email,name,password) VALUES($1,$2,$3,$4)", [
       user,
       email,
       "Владелец",
       hashPassword(password),
     ]);
-    await c.query("INSERT INTO members VALUES($1,$2,'owner')", [team, user]);
+    await c.query("INSERT INTO members(team_id,user_id,role) VALUES($1,$2,'owner')", [team, user]);
     await c.query("INSERT INTO boards VALUES($1,$2,$3)", [
       board,
       team,
