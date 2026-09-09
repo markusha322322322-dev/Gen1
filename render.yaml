@@ -5,7 +5,6 @@ services:
     plan: free
     region: frankfurt
     dockerfilePath: ./Dockerfile.backend
-    dockerCommand: sh -c "node server/setup.mjs --bootstrap && node server/http.mjs"
     healthCheckPath: /api/health
 
     envVars:
