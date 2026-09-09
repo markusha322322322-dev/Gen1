@@ -4,8 +4,7 @@ services:
     runtime: docker
     plan: free
     region: frankfurt
-    dockerfilePath: ./Dockerfile.backend
-    dockerCommand: node server/http.mjs
+    dockerCommand: sh -c "node server/setup.mjs --bootstrap && node server/http.mjs"
     healthCheckPath: /api/health
     preDeployCommand: node server/setup.mjs --bootstrap
     envVars:
