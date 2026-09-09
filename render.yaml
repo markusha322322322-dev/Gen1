@@ -2,7 +2,7 @@ services:
   - type: web
     name: signal-api
     runtime: docker
-    plan: 0.5c-512mb
+    plan: free
     region: frankfurt
     dockerfilePath: ./Dockerfile.backend
     dockerCommand: node server/http.mjs
@@ -13,55 +13,28 @@ services:
         fromDatabase:
           name: signal-db
           property: connectionString
+
       - key: ENCRYPTION_KEY
         generateValue: true
+
       - key: APP_URL
         sync: false
+
       - key: OWNER_EMAIL
         sync: false
+
       - key: OWNER_PASSWORD
         sync: false
+
       - key: TEAM_NAME
         value: Studio Collective
+
       - key: CONNECTOR_ALLOWED_HOSTS
         value: ""
-
-  - type: worker
-    name: signal-worker
-    runtime: docker
-    plan: 0.5c-512mb
-    region: frankfurt
-    dockerfilePath: ./Dockerfile.backend
-    dockerCommand: node server/worker.mjs
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: signal-db
-          property: connectionString
-      - key: ENCRYPTION_KEY
-        fromService:
-          type: web
-          name: signal-api
-          envVarKey: ENCRYPTION_KEY
-      - key: CONNECTOR_ALLOWED_HOSTS
-        value: ""
-
-  - type: worker
-    name: signal-scheduler
-    runtime: docker
-    plan: 0.5c-512mb
-    region: frankfurt
-    dockerfilePath: ./Dockerfile.backend
-    dockerCommand: node server/scheduler.mjs
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: signal-db
-          property: connectionString
 
 databases:
   - name: signal-db
-    plan: 0.1c-256mb
+    plan: free
     region: frankfurt
     databaseName: signal
     user: signal
