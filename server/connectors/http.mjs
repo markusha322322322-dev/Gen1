@@ -34,7 +34,21 @@ export async function get(url, secret) {
     const req = https.get(
       u,
       {
-        lookup: (_h, _o, cb) => cb(null, records[0].address, 4),
+        lookup: (_hostname, options, callback) => {
+  const record = records[0];
+
+  if (typeof options === "object" && options.all) {
+    callback(null, [
+      {
+        address: record.address,
+        family: record.family || 4,
+      },
+    ]);
+    return;
+  }
+
+  callback(null, record.address, record.family || 4);
+},
         headers: {
           "User-Agent": "Signal/1.0",
           ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
