@@ -17,8 +17,4 @@ USER node
 
 EXPOSE 10000
 
-<<<<<<< HEAD
 CMD ["node", "server/start-all.mjs"]
-=======
-CMD ["sh", "-c", "node server/setup.mjs --bootstrap && exec node server/http.mjs"]
->>>>>>> 01f6d26e4647def208585a87f4ff7bb94e9487c7
