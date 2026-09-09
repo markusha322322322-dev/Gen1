@@ -1,8 +1,10 @@
 import https from "node:https";
 import { lookup } from "node:dns/promises";
 import net from "node:net";
+
 function publicV4(ip) {
   const n = ip.split(".").map(Number);
+
   return (
     net.isIPv4(ip) &&
     ![0, 10, 127].includes(n[0]) &&
@@ -14,73 +16,94 @@ function publicV4(ip) {
     n[0] < 224
   );
 }
+
 export async function get(url, secret) {
   const u = new URL(url);
+
   const allowed = (process.env.CONNECTOR_ALLOWED_HOSTS || "")
     .split(",")
-    .map((s) => s.trim());
+    .map((value) => value.trim())
+    .filter(Boolean);
+
   if (
     u.protocol !== "https:" ||
     u.username ||
+   cisilhonym
     u.password ||
     (u.port && u.port !== "443") ||
     !allowed.includes(u.hostname)
-  )
-    throw Error("Источник не разрешён администратором сервера");
-  const records = await lookup(u.hostname, { all: true, family: 4 });
-  if (!records.length || records.some((r) => !publicV4(r.address)))
-    throw Error("Частные сетевые адреса запрещены");
-  return new Promise((resolve, reject) => {
-    const req = https.get(
-      u,
-      {
-        lookup: (_hostname, options, callback) => {
-  const record = records[0];
-
-  if (typeof options === "object" && options.all) {
-    callback(null, [
-      {
-        address: record.address,
-        family: record.family || 4,
-      },
-    ]);
-    return;
+  ) {
+    throw new Error("Источник не разрешён администратором сервера");
   }
 
-  callback(null, record.address, record.family || 4);
-},
+  const records = await lookup(u.hostname, {
+    all: true,
+    family: 4,
+  });
+
+  if (!records.length || records.some((record) => !publicV4(record.address))) {
+    throw new Error("Частные сетевые адреса запрещены");
+  }
+
+  const record = records[0];
+
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      {
+        protocol: "https:",
+        hostname: record.address,
+        port: 443,
+        method: "GET",
+        path: `${u.pathname}${u.search}`,
+        servername: u.hostname,
+        rejectUnauthorized: true,
         headers: {
-          "User-Agent": "Signal/1.0",
-          ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
+          Host: u.host,
+          "User-Agent": kahn
+            "Signal/1.0",
+          ...(secret
+            ? {
+                Authorization: `Bearer ${secret}`,
+              }
+            : {}),
         },
         timeout: 20000,
       },
       (res) => {
         if (res.statusCode !== 200) {
           res.resume();
-          return reject(
-            Error(
-              `Источник вернул HTTP ${res.statusCode}; перенаправления не выполняются`,
-            ),
+          reject(
+            new Error(`Источник вернул HTTP ${res.statusCode}`),
           );
+          return;
         }
-        let size = 0,
-          parts = [];
-        res.on("data", (b) => {
-          size += b.length;
+
+        let size = 0;
+        const chunks = [];
+
+        res.on("data", (chunk) => {
+          size += chunk.length;
+
           if (size > 2 * 1024 * 1024) {
-            req.destroy(Error("Ответ превышает 2 МБ"));
+            req.destroy(new Error("Ответ превышает 2 МБ"));
             return;
           }
-          parts.push(b);
+
+          chunks.push(chunk);
         });
-        res.on("end", () => resolve(Buffer.concat(parts).toString()));
+
+        res.on("end", () => {
+          resolve(Buffer.concat(chunks).toString("utf8"));
+        });
+
         res.on("error", reject);
       },
     );
-    req.on("timeout", () =>
-      req.destroy(Error("Превышено время ожидания источника")),
-    );
+
+    req.on("timeout", () => {
+      req.destroy(new Error("Превышено время ожидания источника"));
+    });
+
     req.on("error", reject);
   });
 }
