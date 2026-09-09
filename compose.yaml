@@ -1,0 +1,54 @@
+x-app: &app
+  build: .
+  environment: &env
+    DATABASE_URL: postgres://signal:${POSTGRES_PASSWORD:-signal_local_only}@postgres:5432/signal
+    ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+    APP_URL: ${APP_URL:-http://localhost:3000}
+    CONNECTOR_ALLOWED_HOSTS: ${CONNECTOR_ALLOWED_HOSTS:-}
+    OWNER_EMAIL: ${OWNER_EMAIL:?Set OWNER_EMAIL in .env}
+    OWNER_PASSWORD: ${OWNER_PASSWORD:?Set OWNER_PASSWORD in .env}
+    TEAM_NAME: ${TEAM_NAME:-Studio Collective}
+  depends_on:
+    postgres:
+      condition: service_healthy
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: signal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-signal_local_only}
+      POSTGRES_DB: signal
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U signal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  migrate:
+    <<: *app
+    command: [node, server/setup.mjs, --bootstrap]
+    restart: "no"
+  web:
+    <<: *app
+    ports: ["3000:3000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  worker:
+    <<: *app
+    command: [node, server/worker.mjs]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  scheduler:
+    <<: *app
+    command: [node, server/scheduler.mjs]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+volumes:
+  postgres_data:
