@@ -4,9 +4,10 @@ services:
     runtime: docker
     plan: free
     region: frankfurt
+    dockerfilePath: ./Dockerfile.backend
     dockerCommand: sh -c "node server/setup.mjs --bootstrap && node server/http.mjs"
     healthCheckPath: /api/health
-    preDeployCommand: node server/setup.mjs --bootstrap
+
     envVars:
       - key: DATABASE_URL
         fromDatabase:
